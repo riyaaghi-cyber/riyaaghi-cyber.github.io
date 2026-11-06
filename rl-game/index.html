@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Canvasser Q-Learning</title>
+<style>
+  /* Colors live here so light and dark mode swap in one place. */
+  :root {
+    color-scheme: light;
+    --bg: #fcfcfb;
+    --panel: #ffffff;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #8a8984;
+    --line: #e4e3df;
+    --grid: #efeeea;
+    --cell: #f4f3ef;
+    --trail: #dbe8f8;
+    --series-1: #2a78d6; /* average reward */
+    --series-2: #eb6834; /* share of games reaching the goal */
+    --supporter: #2a78d6;
+    --voted: #8a8984;
+    --good: #1f7a45;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #1a1a19; --panel: #222220; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #8f8e86;
+      --line: #3a3936; --grid: #2e2d2b; --cell: #2b2a28; --trail: #233a57;
+      --series-1: #3987e5; --series-2: #d95926; --supporter: #3987e5; --voted: #8f8e86; --good: #4cb87a;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #1a1a19; --panel: #222220; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #8f8e86;
+    --line: #3a3936; --grid: #2e2d2b; --cell: #2b2a28; --trail: #233a57;
+    --series-1: #3987e5; --series-2: #d95926; --supporter: #3987e5; --voted: #8f8e86; --good: #4cb87a;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  h2 { font-size: 1.15rem; margin: 0 0 12px; }
+  p { margin: 0 0 12px; }
+  .lede { color: var(--ink-2); margin-bottom: 24px; }
+  section {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px; margin-bottom: 20px;
+  }
+  .two-col { display: grid; grid-template-columns: minmax(0, 320px) minmax(0, 1fr); gap: 24px; }
+  @media (max-width: 700px) { .two-col { grid-template-columns: minmax(0, 1fr); } }
+  button {
+    font: inherit; font-size: 0.95rem; padding: 7px 12px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--cell); color: var(--ink);
+  }
+  button:hover:not(:disabled) { border-color: var(--ink-2); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button.primary { background: var(--series-1); border-color: var(--series-1); color: #fff; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .muted { color: var(--ink-2); font-size: 0.9rem; }
+
+  /* The 5x5 map */
+  #board {
+    display: grid; grid-template-columns: repeat(5, 1fr); grid-template-rows: repeat(5, 1fr); gap: 4px;
+    width: 100%; max-width: 320px; aspect-ratio: 1;
+  }
+  .cell {
+    background: var(--cell); border-radius: 6px; position: relative;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-size: 0.65rem; color: var(--ink-2); text-align: center; line-height: 1.1;
+  }
+  .cell.trail { background: var(--trail); }
+  .cell .icon { font-size: 1.35rem; line-height: 1; }
+  .cell.supporter { box-shadow: inset 0 0 0 2px var(--supporter); }
+  .cell.voted { box-shadow: inset 0 0 0 2px var(--voted); }
+  .cell.knocked .icon { opacity: 0.35; }
+  .cell .check { position: absolute; top: 2px; right: 5px; color: var(--good); font-weight: 700; font-size: 0.85rem; }
+  .cell .walker { position: absolute; bottom: 2px; left: 4px; font-size: 1.1rem; }
+  .pad { display: grid; grid-template-columns: repeat(3, 48px); gap: 4px; margin-top: 12px; }
+  .pad button { padding: 8px 0; }
+
+  .stats { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin-bottom: 12px; }
+  .stats dt { color: var(--ink-2); }
+  .stats dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 600; }
+  #message { min-height: 3em; }
+
+  /* Reward controls */
+  .rewards { display: grid; grid-template-columns: 90px 1fr; gap: 8px 12px; align-items: center; }
+  select { font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+  .rewards input { width: 90px; font: inherit; padding: 5px 8px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink); font-variant-numeric: tabular-nums; }
+  code { font-size: 0.9em; background: var(--cell); padding: 1px 5px; border-radius: 4px; }
+
+  /* Learning curve */
+  .chart-wrap { position: relative; }
+  #chart { width: 100%; height: 360px; display: block; }
+  #tooltip {
+    position: absolute; pointer-events: none; display: none; white-space: nowrap;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 9px; font-size: 0.85rem; box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+  }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.9rem; color: var(--ink-2); margin-bottom: 8px; }
+  .swatch { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+  table { border-collapse: collapse; font-size: 0.9rem; font-variant-numeric: tabular-nums; margin-top: 8px; }
+  th, td { padding: 3px 12px 3px 0; text-align: right; border-bottom: 1px solid var(--line); }
+  summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>The Canvasser: a reinforcement learning game</h1>
+  <p class="lede">
+    You are a canvasser with 20 moves before the polls close. Two houses hold supporters who
+    haven't voted yet; two hold people who already voted. Step onto a house to knock (each house
+    once per game). Then let a Q-learning agent learn the same game from nothing but the reward numbers.
+  </p>
+
+  <!-- 1. The game -->
+  <section>
+    <h2>1. Play the game</h2>
+    <div class="two-col">
+      <div>
+        <div id="board" aria-label="Neighborhood map"></div>
+        <div class="pad" aria-label="Move buttons">
+          <span></span><button data-action="0" aria-label="Up">↑</button><span></span>
+          <button data-action="2" aria-label="Left">←</button>
+          <button data-action="1" aria-label="Down">↓</button>
+          <button data-action="3" aria-label="Right">→</button>
+        </div>
+      </div>
+      <div>
+        <p class="muted" id="mode">You're playing. Use the arrow keys or the buttons.</p>
+        <dl class="stats">
+          <dt>Moves left</dt><dd id="movesLeft"></dd>
+          <dt>Score (reward)</dt><dd id="score"></dd>
+          <dt>Supporters reached</dt><dd id="supporters"></dd>
+          <dt>Already-voted doors</dt><dd id="voted"></dd>
+        </dl>
+        <p id="message"></p>
+        <div class="row"><button id="newGame">New game</button></div>
+        <p class="muted">
+          <b>How the game works.</b> Walking into the edge of the map wastes a move. The game ends when
+          the 20 moves run out or when all four doors have been knocked.
+          The agent sees only its position (25 squares) and which of the 4 houses it has knocked
+          (2⁴ = 16 combinations): <b>25 × 16 = 400 states</b>, 4 moves each, so its table has 1,600 numbers.
+          It does not see the clock.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. Rewards -->
+  <section>
+    <h2>2. The reward function</h2>
+    <p class="muted">These numbers are all the agent ever learns from. Every move earns the sum of the parts that apply.
+      Changes take effect right away for both you and the agent; press <b>Reset agent</b> to retrain from scratch under the new numbers.</p>
+    <div class="row">
+      <label for="rewardPlan">Reward plan</label>
+      <select id="rewardPlan"></select>
+    </div>
+    <p class="muted" id="planNote"></p>
+    <div class="rewards" id="rewardControls"></div>
+    <div class="row" style="margin-top:12px"><button id="defaultRewards">Restore this plan's defaults</button></div>
+  </section>
+
+  <!-- 3. Agent -->
+  <section>
+    <h2>3. The Q-learning agent</h2>
+    <p class="muted">
+      Explores randomly 20% of the time (ε = 0.2), learning rate α = 0.2, discount γ = 0.95,
+      all Q-values start at 0, ties are broken at random, and the random numbers come from a fixed seed,
+      so pressing the same buttons in the same order always gives the same results.
+    </p>
+    <div class="row">
+      <button class="primary" id="train100">Train 100 games</button>
+      <button class="primary" id="train1000">Train 1,000 games</button>
+      <button id="resetAgent">Reset agent</button>
+      <button id="watch">Watch it play</button>
+    </div>
+    <p id="agentStatus" class="muted"></p>
+  </section>
+
+  <!-- 4. Learning curve -->
+  <section>
+    <h2>4. Learning curve</h2>
+    <p class="muted">Each point summarizes a block of 50 training games (exploration included).
+      Top: the average reward the agent collected. Bottom: the share of those games that met the real goal,
+      reaching <b>both</b> unvoted supporters before the polls closed. Both panels share the same horizontal axis.</p>
+    <div class="legend">
+      <span><span class="swatch" style="background:var(--series-1)"></span>Average reward per game</span>
+      <span><span class="swatch" style="background:var(--series-2)"></span>% of games reaching both supporters</span>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="chart" role="img" aria-label="Learning curve: average reward and goal success rate per 50 training games"></canvas>
+      <div id="tooltip"></div>
+    </div>
+    <details>
+      <summary>Show the numbers as a table</summary>
+      <table id="dataTable"></table>
+    </details>
+  </section>
+</main>
+
+<script>
+// =====================================================================
+// REWARD FUNCTION — the points the canvasser gets for each move.
+// Edit the defaults here, or use the controls on the page.
+// =====================================================================
+const DEFAULT_REWARDS = {
+  move: -1,       // every move costs a little time
+  wall: -1,       // extra penalty for walking into the edge of the map
+  supporter: 10,  // knocking on the door of a supporter who hasn't voted yet
+  voted: 0,       // knocking on the door of someone who already voted
+  goal: 0,        // one-time bonus the moment both supporters have been reached
+  turf: 0         // per move, for each not-yet-contacted supporter within one square (off by default)
+};
+
+// Two reward plans you can switch between on the page.
+const REWARD_PLANS = {
+  original: { name: "Original", values: { ...DEFAULT_REWARDS } },
+  // Sounds sensible to a campaign: "reward time spent in our priority turf."
+  // The catch: knocking on the door ends that house's stream of turf points.
+  turf: { name: "Priority-turf bonus", values: { ...DEFAULT_REWARDS, turf: 3 } }
+};
+let currentPlan = "original";
+const REWARDS = { ...REWARD_PLANS.original.values };
+
+// `e` describes what just happened on this move.
+function reward(e) {
+  let r = REWARDS.move;                                   // time passes on every move
+  if (e.hitWall) r += REWARDS.wall;                       // wasted a move bumping into the edge
+  if (e.knocked === "supporter") r += REWARDS.supporter;  // reached an unvoted supporter
+  if (e.knocked === "voted") r += REWARDS.voted;          // reached someone who already voted
+  if (e.goalJustReached) r += REWARDS.goal;               // both supporters now reached
+  r += REWARDS.turf * e.nearSupporters;                   // time spent next to supporters not yet contacted
+  return r;
+}
+
+// Labels for the on-page controls.
+const REWARD_LABELS = {
+  move: "Each move",
+  wall: "Walking into the edge (extra)",
+  supporter: "Knocking on an unvoted supporter's door",
+  voted: "Knocking on an already-voted door",
+  goal: "Bonus when both supporters have been reached",
+  turf: "Each move spent within one square of a supporter not yet contacted"
+};
+
+// =====================================================================
+// THE GAME
+// =====================================================================
+const SIZE = 5;
+const MAX_MOVES = 20;
+const START = { r: 2, c: 0 };
+const HOUSES = [
+  { r: 0, c: 4, type: "supporter" },
+  { r: 4, c: 4, type: "supporter" },
+  { r: 1, c: 1, type: "voted" },
+  { r: 3, c: 1, type: "voted" }
+];
+const ACTIONS = [
+  { dr: -1, dc: 0, name: "up" },
+  { dr: 1, dc: 0, name: "down" },
+  { dr: 0, dc: -1, name: "left" },
+  { dr: 0, dc: 1, name: "right" }
+];
+const ALL_KNOCKED = (1 << HOUSES.length) - 1;  // bitmask 1111
+const SUPPORTERS_MASK = HOUSES.reduce((m, h, i) => h.type === "supporter" ? m | (1 << i) : m, 0);
+const NUM_STATES = SIZE * SIZE * (1 << HOUSES.length);  // 25 squares × 16 knock patterns = 400
+
+function newGame() {
+  return { r: START.r, c: START.c, knocked: 0, movesLeft: MAX_MOVES, score: 0, done: false,
+           trail: [START.r * SIZE + START.c] };
+}
+
+// The agent's view of the game: position + which houses have been knocked.
+function stateIndex(g) {
+  return (g.r * SIZE + g.c) * (1 << HOUSES.length) + g.knocked;
+}
+
+function houseAt(r, c) {
+  return HOUSES.findIndex(h => h.r === r && h.c === c);
+}
+
+// The real goal: both unvoted supporters reached.
+function goalReached(knocked) {
+  return (knocked & SUPPORTERS_MASK) === SUPPORTERS_MASK;
+}
+
+// Apply one move to game `g`. Returns the reward and what happened.
+function step(g, a) {
+  let r = g.r + ACTIONS[a].dr, c = g.c + ACTIONS[a].dc;
+  const hitWall = r < 0 || r >= SIZE || c < 0 || c >= SIZE;
+  if (hitWall) { r = g.r; c = g.c; }  // stay put
+  g.r = r; g.c = c;
+  g.trail.push(r * SIZE + c);
+
+  // Knock if this is a house we haven't knocked yet.
+  const hadGoal = goalReached(g.knocked);
+  const h = houseAt(r, c);
+  let knocked = null;
+  if (h >= 0 && !(g.knocked & (1 << h))) {
+    g.knocked |= 1 << h;
+    knocked = HOUSES[h].type;
+  }
+
+  // Supporters not yet contacted within one square (diagonals count).
+  const nearSupporters = HOUSES.filter((h, i) => h.type === "supporter" && !(g.knocked & (1 << i))
+    && Math.abs(h.r - r) <= 1 && Math.abs(h.c - c) <= 1).length;
+
+  const event = { hitWall, knocked, nearSupporters, goalJustReached: !hadGoal && goalReached(g.knocked) };
+  const pts = reward(event);
+  g.score += pts;
+  g.movesLeft--;
+  g.done = g.movesLeft === 0 || g.knocked === ALL_KNOCKED;
+  return { pts, event };
+}
+
+// =====================================================================
+// SEEDED RANDOM NUMBERS (mulberry32) — same seed, same results
+// =====================================================================
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// =====================================================================
+// Q-LEARNING AGENT
+// =====================================================================
+const EPSILON = 0.2;   // chance of a random move while training
+const ALPHA = 0.2;     // learning rate
+const GAMMA = 0.95;    // discount on future reward
+const SEED = 2024;     // training seed
+const WATCH_SEED = 7;  // separate seed for "Watch it play" so watching doesn't change training
+const BLOCK = 50;      // games per point on the learning curve
+
+let Q, rng, history;   // Q-table, random generator, per-game results
+
+function resetAgent() {
+  Q = new Float64Array(NUM_STATES * ACTIONS.length);  // all zeros
+  rng = mulberry32(SEED);
+  history = [];
+}
+
+function maxQ(s) {
+  let m = -Infinity;
+  for (let a = 0; a < ACTIONS.length; a++) m = Math.max(m, Q[s * ACTIONS.length + a]);
+  return m;
+}
+
+// Best action in state s; ties broken at random.
+function greedyAction(s, rand) {
+  let best = -Infinity, ties = [];
+  for (let a = 0; a < ACTIONS.length; a++) {
+    const v = Q[s * ACTIONS.length + a];
+    if (v > best) { best = v; ties = [a]; }
+    else if (v === best) ties.push(a);
+  }
+  return ties[Math.floor(rand() * ties.length)];
+}
+
+// Epsilon-greedy: usually the best-known move, sometimes a random one.
+function chooseAction(s) {
+  if (rng() < EPSILON) return Math.floor(rng() * ACTIONS.length);
+  return greedyAction(s, rng);
+}
+
+// Play one training game, updating Q after every move.
+function trainOneGame() {
+  const g = newGame();
+  while (!g.done) {
+    const s = stateIndex(g);
+    const a = chooseAction(s);
+    const { pts } = step(g, a);
+    const future = g.done ? 0 : GAMMA * maxQ(stateIndex(g));  // no future after the game ends
+    const i = s * ACTIONS.length + a;
+    Q[i] += ALPHA * (pts + future - Q[i]);
+  }
+  history.push({ score: g.score, goal: goalReached(g.knocked) });
+}
+
+function train(n) {
+  for (let k = 0; k < n; k++) trainOneGame();
+  updateAgentStatus();
+  drawChart();
+  updateTable();
+}
+
+// Average reward and goal rate for each block of 50 games.
+function curve() {
+  const pts = [];
+  for (let i = 0; i + BLOCK <= history.length; i += BLOCK) {
+    const block = history.slice(i, i + BLOCK);
+    pts.push({
+      games: i + BLOCK,
+      avg: block.reduce((s, h) => s + h.score, 0) / BLOCK,
+      goal: 100 * block.filter(h => h.goal).length / BLOCK
+    });
+  }
+  return pts;
+}
+
+// =====================================================================
+// PAGE: board, controls, watching
+// =====================================================================
+const $ = id => document.getElementById(id);
+let game = newGame();
+let watching = null;  // interval id while the agent is playing
+
+function renderBoard() {
+  const board = $("board");
+  board.innerHTML = "";
+  const trail = new Set(game.trail);
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      const cell = document.createElement("div");
+      cell.className = "cell";
+      if (trail.has(r * SIZE + c)) cell.classList.add("trail");
+      const h = houseAt(r, c);
+      if (h >= 0) {
+        const knocked = game.knocked & (1 << h);
+        cell.classList.add(HOUSES[h].type);
+        if (knocked) cell.classList.add("knocked");
+        cell.innerHTML = `<span class="icon">🏠</span>${HOUSES[h].type === "supporter" ? "Supporter" : "Already voted"}`
+          + (knocked ? `<span class="check" aria-label="knocked">✓</span>` : "");
+      }
+      if (game.r === r && game.c === c) {
+        cell.insertAdjacentHTML("beforeend", `<span class="walker" aria-label="canvasser">🚶</span>`);
+      }
+      board.appendChild(cell);
+    }
+  }
+  const count = type => HOUSES.filter((h, i) => h.type === type && (game.knocked & (1 << i))).length;
+  $("movesLeft").textContent = game.movesLeft;
+  $("score").textContent = fmt(game.score);
+  $("supporters").textContent = `${count("supporter")} of 2`;
+  $("voted").textContent = `${count("voted")} of 2`;
+}
+
+function describe(ev, pts) {
+  let what = "Moved.";
+  if (ev.hitWall) what = "Bumped into the edge of the map.";
+  if (ev.knocked === "supporter") what = "Knocked on a supporter's door!";
+  if (ev.knocked === "voted") what = "Knocked on a door, but they already voted.";
+  if (ev.goalJustReached) what += " Both supporters reached.";
+  if (ev.nearSupporters && REWARDS.turf) what += " In priority turf.";
+  return `${what} (${pts >= 0 ? "+" : ""}${fmt(pts)} points)`;
+}
+
+function endMessage() {
+  const ok = goalReached(game.knocked);
+  return (ok ? "Polls closed: goal met, both supporters reached." : "Polls closed: goal missed, not every supporter was reached.")
+    + ` Final score ${fmt(game.score)}.`;
+}
+
+function playerMove(a) {
+  if (game.done || watching) return;
+  const { pts, event } = step(game, a);
+  $("message").textContent = game.done ? describe(event, pts) + " " + endMessage() : describe(event, pts);
+  renderBoard();
+}
+
+function startNewGame() {
+  stopWatching();
+  game = newGame();
+  $("mode").textContent = "You're playing. Use the arrow keys or the buttons.";
+  $("message").textContent = "";
+  renderBoard();
+}
+
+// Animate one game with no exploring (always the best-known move).
+function watchAgent() {
+  stopWatching();
+  game = newGame();
+  const wrng = mulberry32(WATCH_SEED);
+  $("mode").textContent = `The agent is playing (no exploring), after ${history.length.toLocaleString()} training games.`;
+  $("message").textContent = "";
+  renderBoard();
+  setButtons(true);
+  watching = setInterval(() => {
+    const { pts, event } = step(game, greedyAction(stateIndex(game), wrng));
+    $("message").textContent = describe(event, pts);
+    renderBoard();
+    if (game.done) {
+      $("message").textContent += " " + endMessage();
+      stopWatching();
+    }
+  }, 350);
+}
+
+function stopWatching() {
+  if (watching) { clearInterval(watching); watching = null; }
+  setButtons(false);
+}
+
+function setButtons(busy) {
+  for (const id of ["train100", "train1000", "resetAgent", "watch"]) $(id).disabled = busy;
+}
+
+function updateAgentStatus() {
+  const pts = curve();
+  let txt = `Games trained: ${history.length.toLocaleString()}.`;
+  if (pts.length) {
+    const last = pts[pts.length - 1];
+    txt += ` Last 50 games: average reward ${fmt(last.avg)}, goal reached in ${Math.round(last.goal)}%.`;
+  }
+  $("agentStatus").textContent = txt;
+}
+
+// Switch reward plans: load that plan's numbers into the controls.
+function setPlan(key) {
+  currentPlan = key;
+  Object.assign(REWARDS, REWARD_PLANS[key].values);
+  $("rewardPlan").value = key;
+  $("planNote").textContent = key === "turf"
+    ? "A campaign might say: \"Reward canvassers for every minute spent in our priority turf, near the voters we need.\" Press Reset agent, then train, to see what the agent does with it."
+    : "The original reward: points for reaching supporters, a small cost for each move.";
+  buildRewardControls();
+}
+
+function buildRewardControls() {
+  const box = $("rewardControls");
+  box.innerHTML = "";
+  for (const key of Object.keys(DEFAULT_REWARDS)) {
+    const input = document.createElement("input");
+    input.type = "number"; input.step = "0.5"; input.value = REWARDS[key]; input.id = "rw-" + key;
+    input.addEventListener("input", () => {
+      const v = parseFloat(input.value);
+      if (!Number.isNaN(v)) REWARDS[key] = v;
+    });
+    const label = document.createElement("label");
+    label.htmlFor = input.id;
+    label.textContent = REWARD_LABELS[key];
+    box.append(input, label);
+  }
+}
+
+function fmt(x) {
+  return Number.isInteger(x) ? String(x) : x.toFixed(1);
+}
+
+// =====================================================================
+// LEARNING CURVE (canvas): two stacked panels sharing one x-axis
+// =====================================================================
+let hoverIdx = null;
+
+function niceTicks(min, max, count) {
+  if (min === max) { min -= 1; max += 1; }
+  const raw = (max - min) / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw);
+  const lo = Math.floor(min / step) * step, hi = Math.ceil(max / step) * step;
+  const ticks = [];
+  for (let v = lo; v <= hi + step / 2; v += step) ticks.push(+v.toFixed(6));
+  return ticks;
+}
+
+function chartLayout(w, h) {
+  const left = 52, right = 16, top = 26, bottom = 34, gap = 44;
+  const panelH = (h - top - bottom - gap) / 2;
+  return { left, right, plotW: w - left - right,
+           topPanel: { y: top, h: panelH }, botPanel: { y: top + panelH + gap, h: panelH }, bottom };
+}
+
+function drawChart() {
+  const canvas = $("chart");
+  const css = getComputedStyle(document.documentElement);
+  const col = name => css.getPropertyValue(name).trim();
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.font = "12px system-ui, sans-serif";
+
+  const pts = curve();
+  if (!pts.length) {
+    ctx.fillStyle = col("--ink-2");
+    ctx.textAlign = "center";
+    ctx.fillText("Train the agent to see the learning curve (one point per 50 games).", w / 2, h / 2);
+    return;
+  }
+
+  const L = chartLayout(w, h);
+  const maxGames = pts[pts.length - 1].games;
+  const x = games => L.left + (pts.length === 1 ? L.plotW / 2 : (games - BLOCK) / (maxGames - BLOCK) * L.plotW);
+
+  // One panel: gridlines, y labels, line, markers.
+  function panel(p, ticks, key, color, suffix, title) {
+    const lo = ticks[0], hi = ticks[ticks.length - 1];
+    const y = v => p.y + p.h - (v - lo) / (hi - lo) * p.h;
+    ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    for (const t of ticks) {
+      ctx.strokeStyle = t === 0 ? col("--muted") : col("--grid");
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(L.left, Math.round(y(t)) + 0.5); ctx.lineTo(L.left + L.plotW, Math.round(y(t)) + 0.5); ctx.stroke();
+      ctx.fillStyle = col("--ink-2");
+      ctx.fillText(fmt(t) + suffix, L.left - 8, y(t));
+    }
+    ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+    ctx.fillStyle = col("--ink-2");
+    ctx.fillText(title, L.left, p.y - 8);
+
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = "round";
+    ctx.beginPath();
+    pts.forEach((pt, i) => i ? ctx.lineTo(x(pt.games), y(pt[key])) : ctx.moveTo(x(pt.games), y(pt[key])));
+    ctx.stroke();
+    if (pts.length <= 40 || hoverIdx !== null) {
+      pts.forEach((pt, i) => {
+        if (pts.length > 40 && i !== hoverIdx) return;
+        ctx.beginPath(); ctx.arc(x(pt.games), y(pt[key]), i === hoverIdx ? 5 : 3, 0, 2 * Math.PI);
+        ctx.fillStyle = color; ctx.fill();
+        ctx.strokeStyle = col("--panel"); ctx.lineWidth = 2; ctx.stroke();
+      });
+    }
+  }
+
+  const avgs = pts.map(p => p.avg);
+  panel(L.topPanel, niceTicks(Math.min(0, ...avgs), Math.max(0, ...avgs), 4), "avg", col("--series-1"), "", "Average reward per game");
+  panel(L.botPanel, [0, 25, 50, 75, 100], "goal", col("--series-2"), "%", "Games reaching both supporters");
+
+  // Shared x-axis labels.
+  ctx.fillStyle = col("--ink-2"); ctx.textAlign = "center"; ctx.textBaseline = "top";
+  const xBase = L.botPanel.y + L.botPanel.h + 6;
+  const xt = niceTicks(BLOCK, maxGames, Math.min(6, pts.length)).filter(t => t >= BLOCK && t <= maxGames);
+  (xt.length ? xt : [maxGames]).forEach(t => ctx.fillText(t.toLocaleString(), x(t), xBase));
+  ctx.fillText("Training games", L.left + L.plotW / 2, xBase + 14);
+
+  // Hover crosshair.
+  if (hoverIdx !== null && pts[hoverIdx]) {
+    const hx = Math.round(x(pts[hoverIdx].games)) + 0.5;
+    ctx.strokeStyle = col("--muted"); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(hx, L.topPanel.y); ctx.lineTo(hx, L.botPanel.y + L.botPanel.h); ctx.stroke();
+  }
+}
+
+function onChartHover(ev) {
+  const pts = curve();
+  const canvas = $("chart"), tip = $("tooltip");
+  if (!pts.length) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = ev.clientX - rect.left;
+  const L = chartLayout(rect.width, rect.height);
+  const frac = pts.length === 1 ? 0 : (mx - L.left) / L.plotW;
+  const i = Math.max(0, Math.min(pts.length - 1, Math.round(frac * (pts.length - 1))));
+  hoverIdx = i;
+  drawChart();
+  const p = pts[i];
+  tip.innerHTML = `<b>Games ${(p.games - BLOCK + 1).toLocaleString()}–${p.games.toLocaleString()}</b><br>`
+    + `<span class="swatch" style="background:var(--series-1)"></span>Average reward: ${p.avg.toFixed(1)}<br>`
+    + `<span class="swatch" style="background:var(--series-2)"></span>Reached both supporters: ${Math.round(p.goal)}%`;
+  tip.style.display = "block";
+  const tx = Math.min(mx + 12, rect.width - tip.offsetWidth - 4);
+  tip.style.left = Math.max(0, tx) + "px";
+  tip.style.top = "8px";
+}
+
+function onChartLeave() {
+  hoverIdx = null;
+  $("tooltip").style.display = "none";
+  drawChart();
+}
+
+function updateTable() {
+  const rows = curve().map(p =>
+    `<tr><td>${(p.games - BLOCK + 1).toLocaleString()}–${p.games.toLocaleString()}</td><td>${p.avg.toFixed(1)}</td><td>${Math.round(p.goal)}%</td></tr>`);
+  $("dataTable").innerHTML = `<tr><th>Training games</th><th>Average reward</th><th>Reached both supporters</th></tr>` + rows.join("");
+}
+
+// =====================================================================
+// WIRING
+// =====================================================================
+document.querySelectorAll(".pad button").forEach(b =>
+  b.addEventListener("click", () => playerMove(+b.dataset.action)));
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  const keys = { ArrowUp: 0, ArrowDown: 1, ArrowLeft: 2, ArrowRight: 3 };
+  if (e.key in keys) { e.preventDefault(); playerMove(keys[e.key]); }
+});
+$("newGame").addEventListener("click", startNewGame);
+$("train100").addEventListener("click", () => train(100));
+$("train1000").addEventListener("click", () => train(1000));
+$("resetAgent").addEventListener("click", () => { resetAgent(); updateAgentStatus(); drawChart(); updateTable(); });
+$("watch").addEventListener("click", watchAgent);
+$("defaultRewards").addEventListener("click", () => setPlan(currentPlan));
+for (const [key, plan] of Object.entries(REWARD_PLANS)) $("rewardPlan").add(new Option(plan.name, key));
+$("rewardPlan").addEventListener("change", e => setPlan(e.target.value));
+$("chart").addEventListener("mousemove", onChartHover);
+$("chart").addEventListener("mouseleave", onChartLeave);
+window.addEventListener("resize", drawChart);
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawChart);
+
+resetAgent();
+setPlan("original");
+renderBoard();
+updateAgentStatus();
+updateTable();
+drawChart();
+</script>
+</body>
+</html>
